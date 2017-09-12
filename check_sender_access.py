@@ -14,6 +14,7 @@ import logging
 import uuid
 import ldap
 import Milter
+from pprint import pprint
 from Milter.utils import parse_addr
 from logging.handlers import SysLogHandler
 from multiprocessing import Process as Thread, Queue
@@ -27,23 +28,25 @@ parser = ConfigParser()
 parser.read(MAIN_CONF)
 
 S_MAIN = dict(parser.items('main'))
-S_DOMAIN_AL = dict(parser.items('domain_alias'))
+# 
 
 APP_NAME = S_MAIN['name']
 DEBUG = False
 if S_MAIN['debug'] == 'true':
 	DEBUG = True
 
-# list of domain that will be filtered by this script 
-DOMAINS = S_MAIN['domains'].split(';')
 
 EXCEPTION_RE = None
 if S_MAIN['exclude_re']:
 	EXCEPTION_RE = re.compile(S_MAIN['exclude_re'])
 
-DOMAIN_ALIAS = dict(parser.items('domain_alias'))
+# list of domain that will be filtered by this script 
+DOMAINS = S_MAIN['domains'].split(';')
 
 LDAP_CONF = dict(parser.items('ldap')) 
+LDAP_CONF['search_attrs'] = LDAP_CONF['search_attrs'].split(';')
+LDAP_CONF['ret_attrs'] = ['zimbraId']
+LDAP_CONF['ret_attrs'].extend(LDAP_CONF['search_attrs'])
 ### VARIABLES END
 
 # queue for communicating with logging process in background
@@ -97,62 +100,96 @@ class CheckSenderAccess(Milter.Base):
 			return
 		self.log(msg)
 
+	def gen_search_filter(self, email):
+		"""
+		Generate ldap search filter
+		"""
+        	return '(|{0})'.format(
+			''.join( [ '({0}={1})'.format(attr, email) for attr in LDAP_CONF['search_attrs']])
+		)
+
+	def populate_emails(self, ldap_result):
+		"""
+		Get all allowed emails based on ldap search
+		"""
+		result = [None, []]
+		if not ldap_result:
+			return result
+
+		# should not more thatn 1 result data
+		if len(ldap_result) > 1:
+			self.log('warning: Got to result from ldap search')
+			return result
+
+		for key, data in ldap_result[0][1].items():
+			if key == 'zimbraId':
+				result[0] = data[0]
+				continue
+			result[1].extend(data)
+
+		return result
+
 	def check_from_header(self, from_addr):
 		"""
 		comparing MAIL FROM: against From: header,
 		if From: email is not in list of alias, cannonical then reject it
 		"""
-		sfilter = LDAP_CONF['search_filter'].format(self.orig_from, from_addr)
-		self.logd('Running ldap filter {0}'.format(sfilter))
-		result = self.ldp.search_s(LDAP_CONF['base_search'], ldap.SCOPE_SUBTREE, sfilter, ['dn'])
-		if result:
-			return False
+		
+		s_filter = self.gen_search_filter(self.orig_from)
 
-		args = (self.orig_from, from_addr)
-		self.log( 'Violation found: %s doesn\'t has any right sending email as %s'%args )
-		return 'Client does not have permissions to send as this sender'
+		self.logd('Running ldap filter {0}'.format(s_filter))
+
+		result = self.ldp.search_s(LDAP_CONF['base_search'], ldap.SCOPE_SUBTREE, s_filter, LDAP_CONF['ret_attrs'])
+
+		zimbra_id, mails = self.populate_emails(result)	
+		
+		# if email in FROM: header are listed in allowed list
+		if from_addr in mails:
+			return True
+
+		if zimbra_id and S_MAIN['check_sendas_dist'] == 'true':
+			s_filter = '(&(mail={0})(objectClass=zimbraDistributionList)(zimbraACE={1} usr sendAsDistList))'.format(
+				from_addr, zimbra_id
+			)
+			self.logd('Checking for distribution list is enabled, running search filter {0}'.format(s_filter))
+			result = self.ldp.search_s(LDAP_CONF['base_search'], ldap.SCOPE_SUBTREE, s_filter, ['dn'])
+			if result:
+				self.logd('{0} can send as distribution list {1}, allowing mail'.format(self.orig_from, from_addr))
+				return True
+
+		self.log( 'Violation found: {0} doesn\'t has any right sending email as {1}'.format(self.orig_from, from_addr) )
+		self.setreply("550", "5.7.1", S_MAIN['warn_msg'] )
+		return False
 
 
 	def header(self, name, val):
 		name = name.strip().lower()
 
 		if self.orig_from and name == 'from':
-
-			# if FROM: header is using domain alias
-			username, domain = parse_addr(val.lower())
-			if domain in DOMAIN_ALIAS:
-				real_domain = DOMAIN_ALIAS[domain]
-				self.logd('FROM: {0} is using domain alias, altering domain to {1}'.format(val, real_domain))
-				val = '{0}@{1}'.format(username, real_domain)
-
 			if self.orig_from == val:
 				return Milter.CONTINUE
 			
 			if EXCEPTION_RE and EXCEPTION_RE.search(val):
 				self.logd('{0} is match with EXCEPTION regex, continue email to next flow'.format(val))
-				return Milter.CONTINUE
+				return self._done(Milter.CONTINUE)
 
 			if not self.__init_ldap():
 				return self._done(Milter.CONTINUE)
 			
-			result = self.check_from_header(val)
-			if result:
-				self.setreply("550", "5.7.1", result)
+			if not self.check_from_header(val):
 				return self._done(Milter.REJECT)
+
+			return self._done(Milter.CONTINUE)
+
 		return Milter.CONTINUE
 
 	@Milter.noreply
 	def envfrom(self, mailfrom, *str):
 		username, domain = parse_addr(mailfrom.lower())
 		# check if domain is in checking domain list
-		if domain in DOMAINS or domain in DOMAIN_ALIAS: 
-			if domain in DOMAIN_ALIAS:
-				real_domain = DOMAIN_ALIAS[domain]
-				self.logd('MAIL FROM: {0} is using domain alias, altering domain to {1}'.format(mailfrom, real_domain))
-				domain = real_domain
-			
+		if domain in DOMAINS: 
 			self.orig_from = '{0}@{1}'.format(username, domain)
-			self.logd('{0} is in domain list {1}'.format(self.orig_from, DOMAINS))
+			self.logd('{0} is in domain list ({1})'.format(mailfrom, DOMAINS))
 		return Milter.CONTINUE
 
 def background_logger():
