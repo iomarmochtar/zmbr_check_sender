@@ -15,7 +15,7 @@ import uuid
 import ldap
 import Milter
 from pprint import pprint
-from Milter.utils import parse_addr
+from email.utils import parseaddr
 from logging.handlers import SysLogHandler
 from multiprocessing import Process as Thread, Queue
 from ConfigParser import ConfigParser
@@ -166,17 +166,19 @@ class CheckSenderAccess(Milter.Base):
 		name = name.strip().lower()
 
 		if self.orig_from and name == 'from':
-			if self.orig_from == val:
+			name, from_addr = parseaddr(val.lower())
+			
+			if not from_addr or self.orig_from == from_addr:
 				return Milter.CONTINUE
 			
-			if EXCEPTION_RE and EXCEPTION_RE.search(val):
-				self.logd('{0} is match with EXCEPTION regex, continue email to next flow'.format(val))
+			if EXCEPTION_RE and EXCEPTION_RE.search(from_addr):
+				self.logd('{0} is match with EXCEPTION regex, continue email to next flow'.format(from_addr))
 				return self._done(Milter.CONTINUE)
 
 			if not self.__init_ldap():
 				return self._done(Milter.CONTINUE)
 			
-			if not self.check_from_header(val):
+			if not self.check_from_header(from_addr):
 				return self._done(Milter.REJECT)
 
 			return self._done(Milter.CONTINUE)
@@ -185,10 +187,14 @@ class CheckSenderAccess(Milter.Base):
 
 	@Milter.noreply
 	def envfrom(self, mailfrom, *str):
-		username, domain = parse_addr(mailfrom.lower())
+		name, mailfrom = parseaddr(mailfrom.lower())
+		splt = mailfrom.split('@')
+		if len(splt) != 2:
+			return Milter.CONTINUE
+
 		# check if domain is in checking domain list
-		if domain in DOMAINS: 
-			self.orig_from = '{0}@{1}'.format(username, domain)
+		if splt[1] in DOMAINS: 
+			self.orig_from = mailfrom
 			self.logd('{0} is in domain list ({1})'.format(mailfrom, DOMAINS))
 		return Milter.CONTINUE
 
