@@ -36,9 +36,15 @@ if S_MAIN['debug'] == 'true':
     DEBUG = True
 
 
+# Exceptions/Whitelisting
 EXCEPTION_RE = None
 if S_MAIN['exclude_re']:
     EXCEPTION_RE = re.compile(S_MAIN['exclude_re'])
+
+EXCEPTION_ENVE_RE = None
+if S_MAIN['exclude_enve_re']:
+    EXCEPTION_ENVE_RE = re.compile(S_MAIN['exclude_enve_re'])
+
 
 # list of domain that will be filtered by this script 
 DOMAINS = S_MAIN['domains'].split(';')
@@ -181,9 +187,9 @@ class CheckSenderAccess(Milter.Base):
                 return Milter.CONTINUE
 
             self.logd('{0} is in domain list ({1})'.format(from_addr, DOMAINS))
-            
-            if EXCEPTION_RE and EXCEPTION_RE.search(from_addr):
-                self.logd('{0} is match with EXCEPTION regex, continue email to next flow'.format(from_addr))
+
+            if EXCEPTION_ENVE_RE and EXCEPTION_ENVE_RE.search(from_addr):
+                self.logd('{0} is match with EXCEPTION Envelop FROM regex, continue email to next flow'.format(from_addr))
                 return self._done(Milter.CONTINUE)
 
             if not self.__init_ldap():
@@ -199,6 +205,9 @@ class CheckSenderAccess(Milter.Base):
     @Milter.noreply
     def envfrom(self, mailfrom, *str):
         name, mailfrom = parseaddr(mailfrom.lower())
+        if EXCEPTION_RE and EXCEPTION_RE.search(mailfrom):
+            self.logd('{0} is match with EXCEPTION regex, ignoring'.format(mailfrom))
+            mailfrom = None
         self.orig_from = mailfrom
         return Milter.CONTINUE
 
