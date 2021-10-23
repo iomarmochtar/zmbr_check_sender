@@ -1,4 +1,4 @@
-#!/usr/bin/python
+#!/usr/bin/python3
 
 __author__ = ('Imam Omar Mochtar', 'iomarmochtar@gmail.com')
 
@@ -18,7 +18,7 @@ from pprint import pprint
 from email.utils import parseaddr
 from logging.handlers import SysLogHandler
 from multiprocessing import Process as Thread, Queue
-from ConfigParser import ConfigParser
+from configparser import ConfigParser
 
 ### VARIABLES BEGIN
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
